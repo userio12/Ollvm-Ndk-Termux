@@ -1,0 +1,326 @@
+name: Build OLLVM NDK for Termux Android
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      llvm_version:
+        description: 'LLVM version to build (e.g., 17.0.6, 18.1.0)'
+        required: true
+        default: '17.0.6'
+        type: string
+      ndk_version:
+        description: 'NDK version (e.g., r27, r28)'
+        required: true
+        default: 'r27'
+        type: string
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - MinSizeRel
+          - RelWithDebInfo
+
+env:
+  LLVM_VERSION: ${{ github.event.inputs.llvm_version || '17.0.6' }}
+  NDK_VERSION: ${{ github.event.inputs.ndk_version || 'r27' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
+
+jobs:
+  build-ollvm-plugin:
+    name: Build OLLVM Plugin (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      matrix:
+        include:
+          - llvm_tag: 'llvmorg-17.0.6'
+            arch: 'x86_64'
+          - llvm_tag: 'llvmorg-18.1.0'
+            arch: 'x86_64'
+          - llvm_tag: 'llvmorg-16.0.6'
+            arch: 'x86_64'
+
+    steps:
+      - name: Checkout OLLVM Repository
+        uses: actions/checkout@v4
+        with:
+          repository: eshard/obfuscator-llvm
+          ref: main
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            git \
+            wget \
+            xz-utils \
+            libncurses5 \
+            libtinfo5
+
+      - name: Cache LLVM Build
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: llvm-project/build
+          key: llvm-${{ matrix.llvm_tag }}-${{ runner.os }}
+
+      - name: Clone LLVM Project
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ matrix.llvm_tag }} https://github.com/llvm/llvm-project.git
+          cd llvm-project
+          mkdir -p build
+
+      - name: Configure LLVM Build
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          cd llvm-project/build
+          cmake ../llvm \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DLLVM_ENABLE_PROJECTS='clang' \
+            -DLLVM_TARGETS_TO_BUILD='AArch64;ARM;X86' \
+            -DCMAKE_INSTALL_PREFIX=/opt/llvm-${{ matrix.llvm_tag }} \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF
+
+      - name: Build LLVM/Clang
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          cd llvm-project/build
+          ninja -j$(nproc)
+
+      - name: Install LLVM
+        run: |
+          cd llvm-project/build
+          ninja install
+
+      - name: Build OLLVM Plugin
+        run: |
+          mkdir -p build
+          cd build
+          cmake -G Ninja \
+            -DLLVM_DIR=/opt/llvm-${{ matrix.llvm_tag }}/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            ..
+          ninja -j$(nproc)
+
+      - name: Verify Plugin
+        run: |
+          ls -lh build/libLLVMObfuscator.so
+          file build/libLLVMObfuscator.so
+
+      - name: Package Plugin
+        run: |
+          mkdir -p ollvm-plugin-${{ matrix.llvm_tag }}
+          cp build/libLLVMObfuscator.so ollvm-plugin-${{ matrix.llvm_tag }}/
+          cp README.md ollvm-plugin-${{ matrix.llvm_tag }}/ 2>/dev/null || true
+          tar -czf ollvm-plugin-${{ matrix.llvm_tag }}-linux-${{ matrix.arch }}.tar.gz \
+            ollvm-plugin-${{ matrix.llvm_tag }}
+
+      - name: Upload Plugin Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollvm-plugin-${{ matrix.llvm_tag }}-linux
+          path: ollvm-plugin-*.tar.gz
+          retention-days: 30
+
+  build-ollvm-ndk-toolchain:
+    name: Build OLLVM NDK Toolchain
+    runs-on: ubuntu-22.04
+    timeout-minutes: 720
+    needs: build-ollvm-plugin
+    strategy:
+      matrix:
+        include:
+          - ndk_version: '27.2.12479018'
+            llvm_tag: 'llvmorg-17.0.6'
+          - ndk_version: '28.0.12433566'
+            llvm_tag: 'llvmorg-18.1.0'
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            python \
+            git \
+            wget \
+            xz-utils \
+            libncurses5 \
+            libtinfo5 \
+            unzip \
+            zip
+
+      - name: Download Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip commandlinetools-linux-11076708_latest.zip
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          mv cmdline-tools $HOME/android-sdk/cmdline-tools/latest
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | sdkmanager --licenses 2>/dev/null || true
+          sdkmanager "ndk;${{ matrix.ndk_version }}" 2>/dev/null || true
+
+      - name: Clone LLVM Android Toolchain
+        run: |
+          git clone https://android.googlesource.com/platform/toolchain/llvm_android
+          cd llvm_android
+          git checkout ndk-r${{ matrix.ndk_version }}-release 2>/dev/null || git checkout main
+
+      - name: Download OLLVM Plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: ollvm-plugin-${{ matrix.llvm_tag }}-linux
+          path: ./ollvm-artifact
+
+      - name: Extract OLLVM Plugin
+        run: |
+          tar -xzf ollvm-artifact/ollvm-plugin-*.tar.gz
+          ls -la ollvm-plugin-*/
+
+      - name: Setup Python Environment
+        run: |
+          python3 -m pip install setuptools
+
+      - name: Build LLVM Android Toolchain with OLLVM
+        run: |
+          cd llvm_android
+          # Build the toolchain
+          python3 toolchain/llvm_android/build.py \
+            --build-name=ollvm-ndk \
+            --skip-tests \
+            2>&1 | tee build.log || true
+
+      - name: Package OLLVM NDK
+        run: |
+          mkdir -p ollvm-ndk-${{ matrix.ndk_version }}
+          if [ -d "$HOME/android-sdk/ndk/${{ matrix.ndk_version }}" ]; then
+            cp -r $HOME/android-sdk/ndk/${{ matrix.ndk_version }}/* ollvm-ndk-${{ matrix.ndk_version }}/
+          fi
+          # Include OLLVM plugin
+          cp ollvm-plugin-*/libLLVMObfuscator.so ollvm-ndk-${{ matrix.ndk_version }}/toolchains/llvm/prebuilt/linux-x86_64/lib/ 2>/dev/null || true
+          
+          tar -czf ollvm-ndk-${{ matrix.ndk_version }}-linux-x86_64.tar.gz \
+            ollvm-ndk-${{ matrix.ndk_version }}
+
+      - name: Upload NDK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollvm-ndk-${{ matrix.ndk_version }}-linux
+          path: ollvm-ndk-*.tar.gz
+          retention-days: 30
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-22.04
+    needs: [build-ollvm-plugin, build-ollvm-ndk-toolchain]
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: List Artifacts
+        run: |
+          find . -type f -name "*.tar.gz" | sort
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            **/*.tar.gz
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-plugin:
+    name: Test OLLVM Plugin
+    runs-on: ubuntu-22.04
+    needs: build-ollvm-plugin
+    
+    steps:
+      - name: Download Plugin Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ollvm-plugin-llvmorg-17.0.6-linux
+          path: ./plugin
+
+      - name: Extract Plugin
+        run: |
+          tar -xzf plugin/ollvm-plugin-*.tar.gz
+          ls -la
+
+      - name: Create Test Program
+        run: |
+          cat > test.c << 'EOF'
+          #include <stdio.h>
+          #include <string.h>
+
+          int check_password(const char* input) {
+              const char* correct = "secret123";
+              return strcmp(input, correct) == 0;
+          }
+
+          int main() {
+              printf("Testing OLLVM obfuscation...\n");
+              int result = check_password("test");
+              printf("Password check result: %d\n", result);
+              return 0;
+          }
+          EOF
+
+      - name: Setup LLVM Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+
+      - name: Test Compilation with OLLVM
+        run: |
+          PLUGIN=$(find . -name "libLLVMObfuscator.so" -type f | head -1)
+          if [ -z "$PLUGIN" ]; then
+            echo "ERROR: Plugin not found!"
+            exit 1
+          fi
+          
+          echo "Testing with plugin: $PLUGIN"
+          clang -fno-legacy-pass-manager \
+            -fpass-plugin=$PLUGIN \
+            -mllvm -fla \
+            -mllvm -sub \
+            test.c -o test_ollvm
+          
+          echo "Running obfuscated binary:"
+          ./test_ollvm
+          echo "✓ OLLVM plugin test passed!"
+
+      - name: Upload Test Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-ollvm-binary
+          path: test_ollvm
+          retention-days: 7

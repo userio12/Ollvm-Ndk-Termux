@@ -1,0 +1,134 @@
+name: Build OLLVM on Termux (Proot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_version:
+        description: 'LLVM version (e.g., 17.0.6)'
+        required: true
+        default: '17.0.6'
+      distribution:
+        description: 'Proot distribution'
+        required: true
+        default: 'ubuntu'
+        type: choice
+        options:
+          - ubuntu
+          - debian
+
+jobs:
+  build-termux-proot:
+    name: Build in Termux Proot
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU for ARM64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Create Build Script
+        run: |
+          cat > build-termux.sh << 'SCRIPT'
+          #!/bin/bash
+          set -e
+
+          LLVM_VERSION="${{ github.event.inputs.llvm_version || '17.0.6' }}"
+          DISTRO="${{ github.event.inputs.distribution || 'ubuntu' }}"
+
+          echo "=== Setting up $DISTRO proot environment ==="
+          
+          # Update and install dependencies
+          apt update && apt upgrade -y
+          apt install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            git \
+            wget
+
+          echo "=== Cloning LLVM Project ==="
+          git clone --depth 1 --branch llvmorg-$LLVM_VERSION \
+            https://github.com/llvm/llvm-project.git
+          
+          cd llvm-project
+          mkdir -p build && cd build
+
+          echo "=== Configuring LLVM ==="
+          cmake ../llvm \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS='clang' \
+            -DLLVM_TARGETS_TO_BUILD='AArch64;ARM' \
+            -DCMAKE_INSTALL_PREFIX=/opt/llvm-$LLVM_VERSION \
+            -DLLVM_ENABLE_TERMINFO=OFF
+
+          echo "=== Building LLVM (this will take a while) ==="
+          ninja -j$(nproc)
+          ninja install
+
+          echo "=== Cloning OLLVM ==="
+          cd ~
+          git clone https://github.com/eshard/obfuscator-llvm.git
+          cd obfuscator-llvm
+          mkdir -p build && cd build
+
+          echo "=== Building OLLVM Plugin ==="
+          cmake -G Ninja \
+            -DLLVM_DIR=/opt/llvm-$LLVM_VERSION/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            ..
+          ninja
+
+          echo "=== Packaging ==="
+          cd ~
+          mkdir -p ollvm-termux-$LLVM_VERSION
+          cp obfuscator-llvm/build/libLLVMObfuscator.so ollvm-termux-$LLVM_VERSION/
+          cat > ollvm-termux-$LLVM_VERSION/README.md << 'EOF'
+          # OLLVM Plugin for Termux
+          
+          ## Usage
+          ```bash
+          clang -fno-legacy-pass-manager \
+            -fpass-plugin=/path/to/libLLVMObfuscator.so \
+            -mllvm -fla \
+            -mllvm -sub \
+            your_code.c -o your_code
+          ```
+          
+          ## Available Passes
+          - flattening (-fla): Control flow flattening
+          - bogus: Bogus control flow
+          - substitution (-sub): Instruction substitution
+          - split-basic-blocks: Basic block splitting
+          - string-encryption: String encryption
+          EOF
+
+          tar -czf ollvm-termux-$LLVM_VERSION-aarch64.tar.gz \
+            ollvm-termux-$LLVM_VERSION
+
+          echo "=== Build Complete ==="
+          ls -lh ollvm-termux-$LLVM_VERSION-aarch64.tar.gz
+          SCRIPT
+          
+          chmod +x build-termux.sh
+
+      - name: Run Build in ARM64 Container
+        uses: addnab/docker-run-action@v3
+        with:
+          image: arm64v8/ubuntu:22.04
+          options: --platform linux/arm64
+          run: |
+            bash /workspace/build-termux.sh
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollvm-termux-aarch64
+          path: ollvm-termux-*.tar.gz
+          retention-days: 30

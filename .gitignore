@@ -1,0 +1,58 @@
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+*.out
+*.bc
+*.ll
+
+# Build directories
+build/
+cmake-build-*/
+out/
+dist/
+
+# LLVM builds
+llvm-project/
+llvm-*/
+opt/llvm-*
+
+# OLLVM builds
+obfuscator-llvm/build/
+libLLVMObfuscator*
+
+# Termux artifacts
+*.tar.gz
+*.zip
+ollvm-termux-*/
+ollvm-plugin-*/
+ollvm-ndk-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+build.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Android
+.cxx/
+.externalNativeBuild/
+local.properties

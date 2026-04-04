@@ -1,0 +1,233 @@
+name: Build Latest NDK with OLLVM
+
+on:
+  schedule:
+    # Run weekly to catch NDK updates
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      ndk_version:
+        description: 'NDK version (latest, r27, r28)'
+        required: true
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - r27
+          - r28
+
+jobs:
+  detect-latest-ndk:
+    name: Detect Latest NDK
+    runs-on: ubuntu-22.04
+    outputs:
+      ndk_version: ${{ steps.detect.outputs.version }}
+      
+    steps:
+      - name: Detect Latest NDK
+        id: detect
+        run: |
+          if [ "${{ github.event.inputs.ndk_version }}" != "latest" ]; then
+            echo "version=${{ github.event.inputs.ndk_version }}" >> $GITHUB_OUTPUT
+          else
+            # Fetch latest from GitHub API
+            LATEST=$(curl -s https://api.github.com/repos/android/ndk/releases/latest | \
+                     grep '"tag_name"' | \
+                     sed -E 's/.*"([^"]+)".*/\1/' | \
+                     sed 's/r//')
+            echo "version=$LATEST" >> $GITHUB_OUTPUT
+            echo "Latest NDK: r$LATEST"
+          fi
+
+  build-patched-ndk:
+    name: Build Patched NDK Toolchain
+    runs-on: ubuntu-22.04
+    timeout-minutes: 720
+    needs: detect-latest-ndk
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            git \
+            wget \
+            unzip \
+            patchelf
+
+      - name: Download Official NDK
+        run: |
+          NDK_VER=${{ needs.detect-latest-ndk.outputs.ndk_version }}
+          echo "Downloading NDK r$NDK_VER..."
+          
+          # Download command line tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-11076708_latest.zip
+          
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          mv cmdline-tools $HOME/android-sdk/cmdline-tools/latest
+          
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          
+          # Accept licenses and install NDK
+          yes | sdkmanager --licenses 2>/dev/null || true
+          sdkmanager "ndk;$NDK_VER" 2>/dev/null || {
+            # Fallback to known version
+            echo "Requested version not available, using r27"
+            sdkmanager "ndk;27.2.12479018"
+          }
+
+      - name: Clone OLLVM
+        uses: actions/checkout@v4
+        with:
+          repository: eshard/obfuscator-llvm
+          path: obfuscator-llvm
+
+      - name: Download NDK-Aligned LLVM
+        run: |
+          # Download LLVM that matches NDK version
+          git clone --depth 1 --branch llvmorg-17.0.6 https://github.com/llvm/llvm-project.git
+
+      - name: Build LLVM for Plugin
+        run: |
+          cd llvm-project
+          mkdir -p build && cd build
+          
+          cmake ../llvm \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS='clang' \
+            -DLLVM_TARGETS_TO_BUILD='AArch64;ARM;X86' \
+            -DCMAKE_INSTALL_PREFIX=/opt/llvm-ndk \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF
+
+          ninja -j$(nproc)
+          ninja install
+
+      - name: Build OLLVM Plugin
+        run: |
+          cd obfuscator-llvm
+          mkdir -p build && cd build
+          
+          cmake -G Ninja \
+            -DLLVM_DIR=/opt/llvm-ndk/lib/cmake/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            ..
+          
+          ninja
+          
+          ls -lh libLLVMObfuscator.so
+
+      - name: Create Patched NDK Package
+        run: |
+          NDK_VER=${{ needs.detect-latest-ndk.outputs.ndk_version }}
+          PACKAGE_NAME=ollvm-ndk-${NDK_VER}-linux-x86_64
+          
+          mkdir -p $PACKAGE_NAME
+          
+          # Copy official NDK
+          NDK_PATH=$(find $HOME/android-sdk/ndk -type d -maxdepth 1 | grep -v "^$HOME/android-sdk/ndk$" | head -1)
+          cp -r $NDK_PATH/* $PACKAGE_NAME/
+          
+          # Add OLLVM plugin
+          mkdir -p $PACKAGE_NAME/toolchains/llvm/prebuilt/linux-x86_64/lib/
+          cp obfuscator-llvm/build/libLLVMObfuscator.so \
+            $PACKAGE_NAME/toolchains/llvm/prebuilt/linux-x86_64/lib/
+          
+          # Create wrapper script
+          cat > $PACKAGE_NAME/ollvm-clang.sh << 'WRAPPER'
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          PLUGIN="$SCRIPT_DIR/toolchains/llvm/prebuilt/linux-x86_64/lib/libLLVMObfuscator.so"
+          CLANG="$SCRIPT_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          
+          # Auto-inject OLLVM plugin if not disabled
+          if [ "$OLLVM_DISABLED" != "1" ]; then
+            exec "$CLANG" -fno-legacy-pass-manager -fpass-plugin="$PLUGIN" "$@"
+          else
+            exec "$CLANG" "$@"
+          fi
+          WRAPPER
+          
+          chmod +x $PACKAGE_NAME/ollvm-clang.sh
+          
+          # Create README
+          cat > $PACKAGE_NAME/README-OLLVM.md << 'README'
+          # OLLVM-Patched Android NDK
+          
+          ## Usage
+          
+          ### Method 1: Using ollvm-clang wrapper
+          ```bash
+          export PATH=/path/to/ollvm-ndk:$PATH
+          ollvm-clang.sh -mllvm -fla -mllvm -sub your_code.c -o your_code
+          ```
+          
+          ### Method 2: Direct clang with plugin
+          ```bash
+          clang -fno-legacy-pass-manager \
+            -fpass-plugin=/path/to/libLLVMObfuscator.so \
+            -mllvm -fla \
+            your_code.c -o your_code
+          ```
+          
+          ### Method 3: CMake integration
+          In your `build.gradle.kts`:
+          ```kotlin
+          externalNativeBuild {
+              cmake {
+                  arguments += listOf(
+                      "-DANDROID_CCACHE=/path/to/ollvm-clang.sh"
+                  )
+              }
+          }
+          ```
+          
+          ## Available OLLVM Passes
+          
+          | Pass | Flag | Description |
+          |------|------|-------------|
+          | Flattening | `-mllvm -fla` | Control flow flattening |
+          | Bogus | `-mllvm -boguscf` | Bogus control flow insertion |
+          | Substitution | `-mllvm -sub` | Instruction substitution |
+          | Split Blocks | `-mllvm -split` | Basic block splitting |
+          | String Encryption | `-mllvm -sobf` | String literal encryption |
+          
+          ## Disable OLLVM
+          Set `OLLVM_DISABLED=1` environment variable to use standard clang
+          
+          ## Termux Usage
+          1. Extract the package on your device
+          2. Add to PATH: `export PATH=/path/to/ollvm-ndk:$PATH`
+          3. Use `ollvm-clang.sh` instead of `clang`
+          README
+          
+          # Package everything
+          tar -czf $PACKAGE_NAME.tar.gz $PACKAGE_NAME
+          
+          echo "Package created: $PACKAGE_NAME.tar.gz"
+          du -sh $PACKAGE_NAME.tar.gz
+
+      - name: Upload Patched NDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollvm-ndk-patched
+          path: ollvm-ndk-*-linux-x86_64.tar.gz
+          retention-days: 30
+
+      - name: Upload to Release (if tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ollvm-ndk-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
