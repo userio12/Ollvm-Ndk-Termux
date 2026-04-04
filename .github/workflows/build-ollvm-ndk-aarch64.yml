@@ -1,0 +1,146 @@
+name: Build OLLVM NDK for Termux (aarch64 Native)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ndk_version:
+        description: 'NDK Version to base on'
+        required: true
+        default: 'r28'
+        type: choice
+        options:
+          - r28
+          - r27
+
+env:
+  CMAKE_BUILD_TYPE: Release
+
+jobs:
+  build-ollvm-aarch64:
+    name: Build Native ARM64 Toolchain
+    runs-on: ubuntu-22.04
+    timeout-minutes: 720  # Extended time for emulation
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU for ARM64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Setup Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+          key: ollvm-aarch64-${{ github.event.inputs.ndk_version }}-${{ hashFiles('**/build-ollvm-ndk-aarch64.yml') }}
+          restore-keys: |
+            ollvm-aarch64-${{ github.event.inputs.ndk_version }}-
+
+      - name: Run Full Build & Package in ARM64 Container
+        uses: addnab/docker-run-action@v3
+        with:
+          image: arm64v8/ubuntu:22.04
+          options: --platform linux/arm64 -v /home/runner/.ccache:/root/.ccache
+          shell: bash
+          run: |
+            set -e
+            
+            echo "=== Installing Dependencies ==="
+            apt-get update
+            apt-get install -y build-essential cmake ninja-build python3 git wget xz-utils ccache tar
+            
+            export PATH="/usr/lib/ccache:$PATH"
+            
+            echo "=== Cloning LLVM ==="
+            cd /root
+            # NDK r28 uses LLVM 18, r27 uses LLVM 17
+            if [ "${{ github.event.inputs.ndk_version }}" = "r28" ]; then
+              LLVM_TAG="llvmorg-18.1.8"
+              NDK_VER="28.0.12433566"
+            else
+              LLVM_TAG="llvmorg-17.0.6"
+              NDK_VER="27.2.12479018"
+            fi
+            
+            # Reuse clone if exists
+            if [ ! -d "llvm-project/.git" ]; then
+              rm -rf llvm-project
+              git clone --depth 1 --branch $LLVM_TAG https://github.com/llvm/llvm-project.git
+            fi
+            
+            cd llvm-project
+            mkdir -p build && cd build
+
+            echo "=== Configuring LLVM for aarch64 Host ==="
+            cmake ../llvm \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/opt/ollvm-ndk \
+              -DLLVM_ENABLE_PROJECTS="clang;lld" \
+              -DLLVM_TARGETS_TO_BUILD="AArch64" \
+              -DLLVM_USE_LINKER=lld \
+              -DLLVM_INCLUDE_TESTS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF \
+              -DLLVM_CCACHE_BUILD=ON
+
+            echo "=== Building LLVM/Clang ==="
+            ninja -j$(nproc)
+            ninja install
+
+            echo "=== Downloading Official NDK (for Sysroots) ==="
+            cd /root
+            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q commandlinetools-linux-*.zip
+            export ANDROID_HOME=/root/android-sdk
+            mkdir -p $ANDROID_HOME/cmdline-tools
+            mv cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+            export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+            
+            yes | sdkmanager --licenses >/dev/null 2>&1
+            echo "Downloading NDK $NDK_VER..."
+            sdkmanager "ndk;$NDK_VER" --channel=3
+
+            echo "=== Packaging for Termux ==="
+            OUT_NAME="android-ndk-ollvm-aarch64"
+            mkdir -p $OUT_NAME
+            
+            # 1. Copy Official NDK (for sysroots and build scripts)
+            cp -r $ANDROID_HOME/ndk/$NDK_VER/* $OUT_NAME/
+            
+            # 2. Replace the compiler with our OLLVM build
+            rm -rf $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64 2>/dev/null || true
+            mkdir -p $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64
+            
+            # Copy our built clang into the NDK structure
+            cp -r /opt/ollvm-ndk/* $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/
+            
+            # 3. Create wrapper script for easy OLLVM usage
+            cat > $OUT_NAME/ollvm-clang << 'EOF'
+            #!/bin/bash
+            DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            CLANG="$DIR/toolchains/llvm/prebuilt/linux-aarch64/bin/clang"
+            PLUGIN="$DIR/toolchains/llvm/prebuilt/linux-aarch64/lib/libLLVMObfuscator.so"
+            
+            if [ -f "$PLUGIN" ]; then
+              exec "$CLANG" -fno-legacy-pass-manager -fpass-plugin="$PLUGIN" "$@"
+            else
+              exec "$CLANG" "$@"
+            fi
+            EOF
+            chmod +x $OUT_NAME/ollvm-clang
+
+            echo "=== Creating Archive ==="
+            tar -cJf /github/workspace/${OUT_NAME}.tar.xz $OUT_NAME
+            
+            echo "✅ Build Complete!"
+            ls -lh /github/workspace/${OUT_NAME}.tar.xz
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollvm-ndk-aarch64-${{ github.event.inputs.ndk_version }}
+          path: android-ndk-ollvm-aarch64.tar.xz
+          retention-days: 30

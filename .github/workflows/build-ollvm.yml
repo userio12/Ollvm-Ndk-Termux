@@ -71,20 +71,19 @@ jobs:
         id: cache-llvm
         uses: actions/cache@v4
         with:
-          path: llvm-project/build
+          path: llvm-project
           key: llvm-${{ matrix.llvm_tag }}-${{ runner.os }}
 
       - name: Clone LLVM Project
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch ${{ matrix.llvm_tag }} https://github.com/llvm/llvm-project.git
-          cd llvm-project
-          mkdir -p build
 
       - name: Configure LLVM Build
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
-          cd llvm-project/build
+          cd llvm-project
+          mkdir -p build && cd build
           cmake ../llvm \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \

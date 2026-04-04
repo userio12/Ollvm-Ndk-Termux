@@ -124,7 +124,7 @@ jobs:
           image: arm64v8/ubuntu:22.04
           options: --platform linux/arm64
           run: |
-            bash /workspace/build-termux.sh
+            bash /github/workspace/build-termux.sh
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4

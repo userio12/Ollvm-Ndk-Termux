@@ -96,8 +96,15 @@ jobs:
 
       - name: Download NDK-Aligned LLVM
         run: |
-          # Download LLVM that matches NDK version
-          git clone --depth 1 --branch llvmorg-17.0.6 https://github.com/llvm/llvm-project.git
+          # Use LLVM 17 for r27, LLVM 18 for r28
+          NDK_VER=${{ needs.detect-latest-ndk.outputs.ndk_version }}
+          if [[ "$NDK_VER" == "r28"* ]] || [[ "$NDK_VER" =~ ^28 ]]; then
+            LLVM_TAG="llvmorg-18.1.8"
+          else
+            LLVM_TAG="llvmorg-17.0.6"
+          fi
+          echo "Using LLVM $LLVM_TAG for NDK $NDK_VER"
+          git clone --depth 1 --branch $LLVM_TAG https://github.com/llvm/llvm-project.git
 
       - name: Build LLVM for Plugin
         run: |
