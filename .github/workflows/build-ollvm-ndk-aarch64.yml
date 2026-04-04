@@ -50,8 +50,8 @@ jobs:
             
             echo "=== Installing Dependencies ==="
             apt-get update
-            apt-get install -y build-essential cmake ninja-build python3 git wget xz-utils ccache tar
-            
+            apt-get install -y build-essential cmake ninja-build python3 git wget xz-utils ccache tar openjdk-17-jdk-headless
+
             export PATH="/usr/lib/ccache:$PATH"
             
             echo "=== Cloning LLVM ==="
@@ -81,10 +81,12 @@ jobs:
               -DCMAKE_INSTALL_PREFIX=/opt/ollvm-ndk \
               -DLLVM_ENABLE_PROJECTS="clang;lld" \
               -DLLVM_TARGETS_TO_BUILD="AArch64" \
-              -DLLVM_USE_LINKER=lld \
+              -DLLVM_ENABLE_LLD=ON \
               -DLLVM_INCLUDE_TESTS=OFF \
               -DLLVM_INCLUDE_BENCHMARKS=OFF \
-              -DLLVM_CCACHE_BUILD=ON
+              -DLLVM_CCACHE_BUILD=ON \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_ZSTD=OFF
 
             echo "=== Building LLVM/Clang ==="
             ninja -j$(nproc)
