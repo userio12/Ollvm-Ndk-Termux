@@ -81,7 +81,6 @@ jobs:
               -DCMAKE_INSTALL_PREFIX=/opt/ollvm-ndk \
               -DLLVM_ENABLE_PROJECTS="clang;lld" \
               -DLLVM_TARGETS_TO_BUILD="AArch64" \
-              -DLLVM_ENABLE_LLD=ON \
               -DLLVM_INCLUDE_TESTS=OFF \
               -DLLVM_INCLUDE_BENCHMARKS=OFF \
               -DLLVM_CCACHE_BUILD=ON \
