@@ -62,6 +62,12 @@ jobs:
             unzip \
             patchelf
 
+      - name: Setup Java 17 (Required for Android SDK)
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
       - name: Download Official NDK
         run: |
           NDK_VER=${{ needs.detect-latest-ndk.outputs.ndk_version }}
