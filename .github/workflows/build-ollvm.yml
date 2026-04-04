@@ -1,12 +1,6 @@
 name: Build OLLVM NDK for Termux Android
 
 on:
-  push:
-    branches: [ main, master ]
-    tags:
-      - 'v*'
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
     inputs:
       llvm_version:
@@ -18,7 +12,10 @@ on:
         description: 'NDK version (e.g., r27, r28)'
         required: true
         default: 'r27'
-        type: string
+        type: choice
+        options:
+          - r27
+          - r28
       build_type:
         description: 'Build type'
         required: true

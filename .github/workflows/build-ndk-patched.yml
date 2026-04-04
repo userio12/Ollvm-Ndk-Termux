@@ -1,9 +1,6 @@
 name: Build Latest NDK with OLLVM
 
 on:
-  schedule:
-    # Run weekly to catch NDK updates
-    - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       ndk_version:
