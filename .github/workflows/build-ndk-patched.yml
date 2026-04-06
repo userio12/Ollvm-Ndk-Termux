@@ -145,7 +145,13 @@ jobs:
           mkdir -p $PACKAGE_NAME
           
           # Copy official NDK
-          NDK_PATH=$(find $HOME/android-sdk/ndk -type d -maxdepth 1 | grep -v "^$HOME/android-sdk/ndk$" | head -1)
+          NDK_PATH=$(ls -d $HOME/android-sdk/ndk/*/ 2>/dev/null | head -1)
+          if [ -z "$NDK_PATH" ]; then
+            echo "ERROR: NDK not found at $HOME/android-sdk/ndk/"
+            ls -la $HOME/android-sdk/ndk/ || echo "NDK directory doesn't exist"
+            exit 1
+          fi
+          echo "Found NDK at: $NDK_PATH"
           cp -r $NDK_PATH/* $PACKAGE_NAME/
           
           # Add OLLVM plugin

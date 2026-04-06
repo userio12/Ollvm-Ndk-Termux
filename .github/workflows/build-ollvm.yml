@@ -208,7 +208,7 @@ jobs:
           python3 toolchain/llvm_android/build.py \
             --build-name=ollvm-ndk \
             --skip-tests \
-            2>&1 | tee build.log || true
+            2>&1 | tee build.log
 
       - name: Package OLLVM NDK
         run: |

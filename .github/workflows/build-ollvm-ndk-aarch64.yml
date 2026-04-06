@@ -50,7 +50,10 @@ jobs:
             
             echo "=== Installing Dependencies ==="
             apt-get update
-            apt-get install -y build-essential cmake ninja-build python3 git wget xz-utils ccache tar openjdk-17-jdk-headless
+            apt-get install -y build-essential cmake ninja-build python3 git wget xz-utils ccache tar software-properties-common
+            add-apt-repository -y ppa:openjdk-r/ppa
+            apt-get update
+            apt-get install -y openjdk-17-jdk-headless
 
             export PATH="/usr/lib/ccache:$PATH"
             
@@ -79,7 +82,7 @@ jobs:
               -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX=/opt/ollvm-ndk \
-              -DLLVM_ENABLE_PROJECTS="clang;lld" \
+              -DLLVM_ENABLE_PROJECTS="clang" \
               -DLLVM_TARGETS_TO_BUILD="AArch64" \
               -DLLVM_INCLUDE_TESTS=OFF \
               -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -90,6 +93,18 @@ jobs:
             echo "=== Building LLVM/Clang ==="
             ninja -j$(nproc)
             ninja install
+
+            echo "=== Cloning & Building OLLVM Plugin ==="
+            cd /root
+            git clone --depth 1 https://github.com/eshard/obfuscator-llvm.git
+            cd obfuscator-llvm
+            mkdir -p build && cd build
+            
+            cmake -G Ninja \
+              -DLLVM_DIR=/opt/ollvm-ndk/lib/cmake/llvm \
+              -DCMAKE_BUILD_TYPE=Release \
+              ..
+            ninja -j$(nproc)
 
             echo "=== Downloading Official NDK (for Sysroots) ==="
             cd /root
@@ -111,12 +126,19 @@ jobs:
             # 1. Copy Official NDK (for sysroots and build scripts)
             cp -r $ANDROID_HOME/ndk/$NDK_VER/* $OUT_NAME/
             
-            # 2. Replace the compiler with our OLLVM build
-            rm -rf $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64 2>/dev/null || true
-            mkdir -p $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64
+            # 2. Replace only the toolchain binaries, preserve sysroot
+            rm -rf $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/bin 2>/dev/null || true
+            rm -rf $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/lib 2>/dev/null || true
+            
+            mkdir -p $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/bin
+            mkdir -p $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/lib
             
             # Copy our built clang into the NDK structure
-            cp -r /opt/ollvm-ndk/* $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/
+            cp -r /opt/ollvm-ndk/bin/* $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/bin/
+            
+            # Copy OLLVM plugin
+            cp /root/obfuscator-llvm/build/libLLVMObfuscator.so \
+              $OUT_NAME/toolchains/llvm/prebuilt/linux-aarch64/lib/
             
             # 3. Create wrapper script for easy OLLVM usage
             cat > $OUT_NAME/ollvm-clang << 'EOF'
